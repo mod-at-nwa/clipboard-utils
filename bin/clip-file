@@ -1,0 +1,25 @@
+#!/bin/sh
+# clip-file: Copy file contents to X clipboard
+# Author: Claude
+# Date: 2024-11-28
+# Install location: /usr/local/bin/clip-file
+#
+# Description:
+#   Copies file contents or stdin to X clipboard using xclip
+#
+# Usage:
+#   clip-file [file]          - Copy file to clipboard
+#   cat file | clip-file      - Pipe content to clipboard
+#   echo "text" | clip-file   - Pipe text to clipboard
+#
+# TODO Features under consideration:
+#   -c          Clear clipboard
+#   -p          Print clipboard contents
+#   -s [sel]    Use different X selection (primary/secondary/clipboard)
+#   Error handling when xclip missing
+
+if [ -z "$1" ]; then
+    xclip -selection clipboard
+else
+    cat "$1" | xclip -selection clipboard
+fi

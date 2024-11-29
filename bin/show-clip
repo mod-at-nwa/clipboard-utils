@@ -1,0 +1,302 @@
+#!/bin/sh
+# show-clip: Persistent clipboard monitor with history and visual transitions
+# Authors: Meldrey with Claude/Anthropic
+# Date: 2024-11-28
+# Install location: /usr/local/bin/show-clip
+#
+# Version history:
+# 1.0-alpha: Initial implementation with basic clipboard monitoring
+# 1.1-alpha: Added file-based history system and config
+# 1.2-alpha: Improved screen updates using cursor control
+# 1.3-alpha: Added visual transitions and color support
+# 1.4-alpha: Added help system and version tracking
+# 1.5-alpha: Updated colors and special character definitions
+# 1.6-alpha: Updated interface - freeze two rows
+# 1.7.0-alpha: Major update
+#   - Implemented numbered clip system (00 = current)
+#   - Added proper multiline content handling with preview
+#   - Added separator lines between clips
+#   - Enhanced progress bar with total clips display
+#   - Added history support up to MAX_ENTRIES=50
+#   - Implemented file-based history system
+# 1.7.1-alpha: Display system improvements
+#   - Removed browse-history feature
+#   - Simplified display system
+#   - Fixed separator line characters (ASCII)
+#   - Implemented automatic clip shifting
+#   - Cleaned up visual presentation
+# 1.7.2-alpha: History and display enhancements
+#   - Added --clear/-c option for emergency cleanup
+#   - Implemented smart content truncation
+#   - Fixed duplicate history issues
+#   - Added clipboard read error handling
+#   - Set MAX_LINES_DISPLAY=4 and MAX_LINE_LENGTH=80
+#   - Improved visual formatting
+# 1.7.3-alpha: Interface updates
+#   - Reorganized header layout
+#   - Integrated progress bar into header line
+#   - Removed redundant total clips display
+#   - Implemented single status line with clean separator
+# 1.7.4-alpha: Display fixes
+#   - Fixed color code interpretation using echo -e
+#   - Fixed progress bar number formatting
+#   - Made color definitions more portable
+#   - Cleaned up display formatting
+# 1.8-alpha: Full multiline support, as such:
+#   - Print all lines of a clip on as few lines as possible.
+#   - If this were 'vi', I need a 'J' for every line in each clip. However, straight up lolcat so each line gets its own distinguishment.
+# 1.8.1-alpha: Conjoined and colorized results in truncate_content()
+#
+# Features:
+#   - Persistent clipboard monitoring
+#   - Visual transitions between clips
+#   - Progress bar during updates
+#   - File-based history system
+#   - Smart content truncation
+#   - Emergency history cleanup
+#   - Configurable colors and timing
+#
+# TODO:
+#   - Full multiline content viewing (1.8)
+#   - History browsing as below -v (1.9)
+#   - Scrolling history, cursor (with mouse and vi shortcuts)
+#   - Add Ctrl-X to exit (1.8.5)
+#   - Add Ctrl-D to clear (1.8.5)
+#   - Remove Ctrl-C for future copying/pasting needs
+#
+# Configuration:
+#   MAX_ENTRIES=50
+#   MAX_LINES_DISPLAY=4
+#   MAX_LINE_LENGTH=80
+#   UPDATE_INTERVAL=0.5
+
+VERSION="1.8.5-alpha"
+PROGRAM_NAME="show-clip"
+
+CLIP_DIR="/tmp/show-clip"
+CONFIG_DIR="${HOME}/.config/show-clip"
+CONFIG_FILE="${CONFIG_DIR}/config"
+MAX_ENTRIES=50
+UPDATE_INTERVAL=0.5
+MAX_LINES_DISPLAY=4        
+MAX_LINE_LENGTH=80         
+
+# Colors
+# OLD_CLIP_COLOR='\033[90m'    
+# NEW_CLIP_COLOR='\033[0m'     
+# PROGRESS_COLOR='\033[36m'    
+# NUMBER_COLOR='\033[35m'      
+# SEPARATOR_COLOR='\033[34m'   
+# RESET_COLOR='\033[0m'
+
+# Colors (using echo -e to set them)
+OLD_CLIP_COLOR=$(echo -en '\033[90m')
+NEW_CLIP_COLOR=$(echo -en '\033[0m')
+PROGRESS_COLOR=$(echo -en '\033[36m')
+NUMBER_COLOR=$(echo -en '\033[35m')
+SEPARATOR_COLOR=$(echo -en '\033[34m')
+RED_COLOR=$(echo -en '\033[91m')
+RESET_COLOR=$(echo -en '\033[0m')
+
+handle_ctrl_x() {
+    cleanup
+}
+
+handle_ctrl_d() {
+    cleanup
+    # clear_and_continue
+}
+
+# Terminal control functions remain the same
+save_cursor() { printf '\033[s'; }
+restore_cursor() { printf '\033[u'; }
+clear_line() { printf '\033[2K'; }
+move_up() { printf '\033[%dA' "$1"; }
+move_down() { printf '\033[%dB' "$1"; }
+
+# Previous functions remain the same
+clear_clipboard_history() {
+    rm -f "${CLIP_DIR}"/*.clip
+    printf "${PROGRESS_COLOR}Clipboard history cleared${RESET_COLOR}\n"
+    exit 0
+}
+
+truncate_content() {
+    local content="$1"
+    local max_width=$(($(tput cols) - 5))
+    local total_bytes=${#content}
+    local max_total_length=$((max_width * 3))
+    
+    # Use a temp file to store our output across the subshell
+    local temp_output=""
+    local current_length=0
+    
+    # Read the content line by line without using a pipe
+    while IFS= read -r line || [ -n "$line" ]; do
+        current_length=$((current_length + ${#line} + 4))
+        
+        if [ $current_length -gt $max_total_length ]; then
+            printf "%s${RED_COLOR}[%db total]${RESET_COLOR}\n" "$temp_output" "$total_bytes"
+            return
+        fi
+        
+        # Add the line
+        if [ -z "$temp_output" ]; then
+            temp_output="$line"
+        else
+            temp_output="${temp_output}${PROGRESS_COLOR}\\n${RESET_COLOR}${line}"
+        fi
+        
+    done <<< "$content"
+    
+    printf "%s\n" "$temp_output"
+}
+
+draw_clip_entry() {
+    local content="$1"
+    local number="$2"
+    local width=$(tput cols)
+    local separator_width=$((width - 5))
+    local colors=('\033[31m' '\033[33m' '\033[32m' '\033[36m' '\033[34m' '\033[35m')
+    local color_index=0
+    
+    printf "${NUMBER_COLOR}%02d${RESET_COLOR} | " "$number"
+    
+    truncate_content "$content" | while IFS= read -r line; do
+        if [ $color_index -eq 0 ]; then
+            printf "%s\n" "$line"
+        else
+            printf "${colors[$((color_index % 6))]}   | %s${RESET_COLOR}\n" "$line"
+        fi
+        color_index=$((color_index + 1))
+    done
+    
+    printf "${SEPARATOR_COLOR}   %${separator_width}s${RESET_COLOR}\n" "" | tr ' ' '-'
+}
+
+draw_progress_bar() {
+    local width=20
+    local filled=$1
+    local empty=$((width - filled))
+    local total=$2
+
+    # Pre-format the total number
+    local formatted_total=$(printf "%02d" "$total")
+
+    echo -en "${PROGRESS_COLOR}Clips: ${formatted_total} ["
+    printf "%${filled}s" | tr ' ' '#'
+    printf "%${empty}s" | tr ' ' '.'
+    echo -en "]${RESET_COLOR}"
+}
+
+initialize_screen() {
+    clear
+    tput cup 0 0
+    tput smcup
+    tput civis
+
+    # Modified header line with both controls
+    printf "${PROGRESS_COLOR}show-clip v%s${RESET_COLOR} :: " "$VERSION"
+    draw_progress_bar 0 0
+    printf " :: ${NEW_CLIP_COLOR}$(tput smul)Ctrl+X Exit${RESET_COLOR}"
+    printf " :: ${NEW_CLIP_COLOR}$(tput smul)Ctrl+D Clear${RESET_COLOR}\n"
+
+    # Single separator line
+    printf '%*s\n' "$(tput cols)" '' | tr ' ' '-'
+
+    tput sc
+}
+
+# Modify the trap handling at the start of the script
+cleanup() {
+    tput cnorm
+    tput rmcup
+    exit 0
+}
+
+clear_clipboard_history() {
+    rm -f "${CLIP_DIR}"/*.clip 2>/dev/null
+    # Optionally, we can recreate clip 00 with current clipboard content:
+    xclip -selection clipboard -o > "${CLIP_DIR}/00.clip" 2>/dev/null
+    return 0
+}
+
+clear_and_continue() {
+    clear_clipboard_history
+    initialize_screen
+}
+
+trap cleanup TERM
+trap cleanup EXIT
+trap handle_ctrl_x SIGQUIT  # Ctrl-X
+trap handle_ctrl_d SIGEOF   # Ctrl-D
+
+watch_clipboard() {
+    local last_clip=""
+    local total_clips=0
+    initialize_screen
+    
+    while true; do
+        current_clip=$(xclip -selection clipboard -o 2>/dev/null || echo "")
+        
+        if [ "$current_clip" != "$last_clip" ] && [ -n "$current_clip" ]; then
+            rm -f "${CLIP_DIR}/$(printf "%02d" "$MAX_ENTRIES").clip" 2>/dev/null
+            for i in $(seq $((MAX_ENTRIES - 2)) -1 0); do
+                next=$((i + 1))
+                if [ -f "${CLIP_DIR}/$(printf "%02d" "$i").clip" ]; then
+                    mv "${CLIP_DIR}/$(printf "%02d" "$i").clip" \
+                       "${CLIP_DIR}/$(printf "%02d" "$next").clip"
+                fi
+            done
+            
+            echo "$current_clip" > "${CLIP_DIR}/00.clip"
+            
+            total_clips=$(ls -1 "${CLIP_DIR}"/*.clip 2>/dev/null | wc -l)
+            [ "$total_clips" -gt "$MAX_ENTRIES" ] && total_clips=$MAX_ENTRIES
+            
+            tput rc
+            tput ed
+            
+            # Update header with new progress
+            tput cup 0 0
+            printf "${PROGRESS_COLOR}show-clip v%s${RESET_COLOR} :: " "$VERSION"
+            draw_progress_bar $((total_clips * 20 / MAX_ENTRIES)) "$total_clips"
+            printf " :: ${NEW_CLIP_COLOR}$(tput smul)Ctrl+C Exit${RESET_COLOR}\n"
+            printf '%*s\n' "$(tput cols)" '' | tr ' ' '-'
+            
+            for i in $(seq 0 3); do
+                if [ -f "${CLIP_DIR}/$(printf "%02d" "$i").clip" ]; then
+                    content=$(cat "${CLIP_DIR}/$(printf "%02d" "$i").clip")
+                    draw_clip_entry "$content" "$i"
+                fi
+            done
+            
+            last_clip="$current_clip"
+        fi
+        
+        sleep "$UPDATE_INTERVAL"
+    done
+}
+
+# Main program
+mkdir -p "$CLIP_DIR"
+case "$1" in
+    -h|--help)
+        show_help
+        ;;
+    -v|--version)
+        show_version
+        ;;
+    -c|--clear)
+        clear_clipboard_history
+        ;;
+    "")
+        watch_clipboard
+        ;;
+    *)
+        echo "Unknown option: $1"
+        echo "Use --help for usage information"
+        exit 1
+        ;;
+esac
+
